@@ -24,6 +24,7 @@ import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings"
 import { cn } from "~/lib/utils";
 
 import { AudioPreview } from "./AudioPreview";
+import { usePreviewAuthorizationVersion } from "./usePreviewAuthorizationVersion";
 import { BrowserDocumentFrame } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
 import {
@@ -92,15 +93,16 @@ export function AttachmentFilePreview(props: {
   const [localUrl, setLocalUrl] = useState<string | null>(null);
   const [rendered, setRendered] = useState(true);
   const [revision, setRevision] = useState(0);
-  const authorizationRequest = JSON.stringify([
+  const authorizationRequestKey = JSON.stringify([
     props.asset?.environmentId,
     attachmentId,
     props.name,
     props.mimeType,
     revision,
   ]);
+  const authorizationRequest = usePreviewAuthorizationVersion(authorizationRequestKey, refresh);
   const [remoteAuthorization, setRemoteAuthorization] = useState<{
-    request: string;
+    request: number;
     refresh: typeof refresh;
     url: string;
   } | null>(null);

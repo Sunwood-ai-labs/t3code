@@ -115,19 +115,19 @@ function CustomStageBackdrop({
       if (!active || !canvas) return;
       try {
         const context = canvas.getContext("2d");
-        if (!context || image.naturalWidth === 0 || image.naturalHeight === 0) return;
-        const scale = Math.min(1, 2_048 / Math.max(image.naturalWidth, image.naturalHeight));
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
-        // Canvas draws an animated image's default/first frame. Draw once and release the source
-        // so decorative sidebar artwork never becomes a continuous animation/repaint loop.
-        context.drawImage(image, 0, 0, canvas.width, canvas.height);
-        setReady(true);
+        if (context && image.naturalWidth > 0 && image.naturalHeight > 0) {
+          const scale = Math.min(1, 2_048 / Math.max(image.naturalWidth, image.naturalHeight));
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          // Canvas draws an animated image's default/first frame. Draw once and release the source
+          // so decorative sidebar artwork never becomes a continuous animation/repaint loop.
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          setReady(true);
+        }
       } catch {
         // Unsupported images or canvas allocation failures keep the built-in artwork.
-      } finally {
-        release();
       }
+      release();
     };
     image.addEventListener("load", onLoad, { once: true });
     image.addEventListener("error", release, { once: true });

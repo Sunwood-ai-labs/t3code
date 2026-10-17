@@ -1,9 +1,10 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import type { OfficePreviewFormat } from "@t3tools/shared/filePreview";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
 import { workspaceAssetResource } from "./filePreviewMode";
+import { usePreviewAuthorizationVersion } from "./usePreviewAuthorizationVersion";
 import { FileSurfaceFailure, FileSurfaceLoading } from "./fileSurfaceChrome";
 
 const OfficeDocumentPreview = lazy(() => import("./OfficeDocumentPreview"));
@@ -19,30 +20,34 @@ export function WorkspaceOfficePreview(props: {
   readonly workspaceMutationId: string | null;
   readonly reloadRevision?: number;
 }) {
-  const resource = useMemo(
-    () =>
-      workspaceAssetResource({
-        kind: "media-file",
-        threadRef: props.threadRef,
-        draft: props.draft,
-        workspaceRoot: props.workspaceRoot,
-        absolutePath: props.absolutePath,
-      }),
-    [props.threadRef, props.draft, props.workspaceRoot, props.absolutePath],
-  );
+  const resource = workspaceAssetResource({
+    kind: "media-file",
+    threadRef: props.threadRef,
+    draft: props.draft,
+    workspaceRoot: props.workspaceRoot,
+    absolutePath: props.absolutePath,
+  });
   const refresh = useAssetUrlRefresh(props.environmentId, resource);
   const mutationId = props.reloadRevision
     ? `manual:${props.reloadRevision}:${props.workspaceMutationId ?? ""}`
     : props.workspaceMutationId;
   const [retryRevision, setRetryRevision] = useState(0);
-  const request = useMemo(
-    () => ({ environmentId: props.environmentId, resource, mutationId, retryRevision, refresh }),
-    [props.environmentId, resource, mutationId, retryRevision, refresh],
-  );
+  const requestKey = JSON.stringify([
+    props.environmentId,
+    props.threadRef.environmentId,
+    props.threadRef.threadId,
+    props.draft,
+    props.workspaceRoot,
+    props.absolutePath,
+    mutationId,
+    retryRevision,
+  ]);
+  const request = usePreviewAuthorizationVersion(requestKey, refresh);
   const requiresAuthorization = mutationId !== null || retryRevision > 0;
   const asset = useAssetUrlState(props.environmentId, requiresAuthorization ? null : resource);
   const [authorization, setAuthorization] = useState<{
-    request: typeof request;
+    request: number;
+    refresh: typeof refresh;
     url: string | null;
   } | null>(null);
   useEffect(() => {
@@ -52,16 +57,20 @@ export function WorkspaceOfficePreview(props: {
     // cached capability can otherwise start a second download while this resolves.
     void refresh()
       .then((url) => {
-        if (!cancelled) setAuthorization({ request, url });
+        if (!cancelled) setAuthorization({ request, refresh, url });
       })
       .catch(() => {
-        if (!cancelled) setAuthorization({ request, url: null });
+        if (!cancelled) setAuthorization({ request, refresh, url: null });
       });
     return () => {
       cancelled = true;
     };
   }, [refresh, request, requiresAuthorization]);
-  if (requiresAuthorization && authorization?.request !== request) return <FileSurfaceLoading />;
+  if (
+    requiresAuthorization &&
+    (authorization?.request !== request || authorization?.refresh !== refresh)
+  )
+    return <FileSurfaceLoading />;
   const url = requiresAuthorization
     ? authorization?.url
     : asset._tag === "Success"

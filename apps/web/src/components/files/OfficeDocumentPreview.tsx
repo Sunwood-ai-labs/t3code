@@ -1,4 +1,4 @@
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { Button } from "~/components/ui/button";
 import { FileSurfaceFailure, FileSurfaceLoading, FileSurfaceNotice } from "./fileSurfaceChrome";
@@ -219,15 +219,26 @@ export default function OfficeDocumentPreview(
   },
 ) {
   const [revision, setRevision] = useState(0);
-  const client = useMemo(
-    () =>
-      createOfficeDocumentClient(
-        { name: props.name, format: props.format, src: props.src, file: props.file },
-        revision,
-      ),
-    [props.name, props.format, props.src, props.file, revision],
+  const source = { name: props.name, format: props.format, src: props.src, file: props.file };
+  const [load, setLoad] = useState(() => ({
+    source,
+    revision,
+    documentClient: createOfficeDocumentClient(source, revision),
+  }));
+  if (
+    load.source.name !== props.name ||
+    load.source.format !== props.format ||
+    load.source.src !== props.src ||
+    load.source.file !== props.file ||
+    load.revision !== revision
+  ) {
+    setLoad({ source, revision, documentClient: createOfficeDocumentClient(source, revision) });
+  }
+  const state = useSyncExternalStore(
+    load.documentClient.subscribe,
+    load.documentClient.getSnapshot,
+    load.documentClient.getSnapshot,
   );
-  const state = useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
   if (state.status === "loading") return <FileSurfaceLoading />;
   if (state.status === "error")
     return (
