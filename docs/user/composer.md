@@ -327,6 +327,22 @@ Follow an agent's file link to read a report or other file outside the workspace
 These files open read-only. An HTML file outside the workspace cannot load scripts,
 styles, or images from neighboring files.
 
+## Excel and PowerPoint previews
+
+On web and desktop, open an `.xlsx`, binary `.xls`, or `.pptx` file from Files, a file
+link, or an attachment. Excel previews show read-only values in visible worksheets,
+limited to the first 100 rows and 30 columns. Cached formula values are shown when
+available; formulas are not recalculated.
+
+PowerPoint previews show basic text, images, and simple shapes, with a text outline
+for content that cannot be placed on the slide. Themes, charts, grouped shapes,
+animations, and some formatting are not reproduced. Use the original file when
+appearance or complete content matters. Legacy `.ppt` files require another app.
+
+Office previews accept files up to 5 MiB; complex or large expanded documents may
+also exceed preview limits. Save attachments or open workspace files in another
+app when a preview is unavailable. Mobile continues to use the device's file viewer.
+
 ## HTML and PDF files in the file viewer
 
 On web and desktop, HTML and PDF files open as rendered pages. Switch an HTML

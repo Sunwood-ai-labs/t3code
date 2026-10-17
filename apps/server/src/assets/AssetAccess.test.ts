@@ -712,6 +712,40 @@ describe("AssetAccess", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("keeps Office files out of directory-scoped browser-document grants", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-office-browser-grant-" });
+      yield* fs.makeDirectory(path.join(root, "nested"));
+      yield* fs.writeFileString(path.join(root, "style.css"), "body { color: red; }");
+      for (const name of ["private.xlsx", "private.xls", "private.pptx", "nested/private.XLSX"]) {
+        yield* fs.writeFileString(path.join(root, name), "Office file bytes");
+      }
+      for (const name of ["report.html", "report.pdf"]) {
+        yield* fs.writeFileString(path.join(root, name), "browser document bytes");
+        for (const resource of [
+          { _tag: "workspace-file" as const, threadId: ThreadId.make("thread-1"), path: name },
+          { _tag: "draft-workspace-file" as const, cwd: root, path: name },
+        ]) {
+          const result = yield* issueAssetUrl({ resource, workspaceRoot: root });
+          const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const token = suffix.slice(0, suffix.indexOf("/"));
+          expect(yield* resolveAsset(token, name)).toMatchObject({ kind: "file" });
+          expect(yield* resolveAsset(token, "style.css")).toMatchObject({ kind: "file" });
+          for (const sibling of [
+            "private.xlsx",
+            "private.xls",
+            "private.pptx",
+            "nested/private.XLSX",
+          ]) {
+            expect(yield* resolveAsset(token, sibling)).toBeNull();
+          }
+        }
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("rejects workspace files outside the authorized root", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -912,6 +946,165 @@ describe("AssetAccess", () => {
       expect(yield* resolveAsset(token, "other.png")).toBeNull();
       expect(yield* resolveAsset(token, "../icon.png")).toBeNull();
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "serves Office bytes through signed workspace and host URLs without sibling access",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-office-workspace-" });
+        const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-office-host-" });
+        // Asset access transports bytes; parsing and format validation belong to the viewer.
+        const bytes = new Uint8Array([0x50, 0x4b, 3, 4, 0, 0xff]);
+        for (const [extension, mimeType] of [
+          ["xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+          ["xls", "application/vnd.ms-excel"],
+          ["pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+        ] as const) {
+          for (const source of ["workspace", "draft", "host"] as const) {
+            const directory = source === "host" ? outside : root;
+            const name = `report.${extension}`;
+            const filePath = path.join(directory, name);
+            yield* fs.writeFile(filePath, bytes);
+            yield* fs.writeFile(path.join(directory, `sibling.${extension}`), bytes);
+            const resource =
+              source === "workspace"
+                ? {
+                    _tag: "workspace-file" as const,
+                    threadId: ThreadId.make("thread-1"),
+                    path: name,
+                  }
+                : source === "draft"
+                  ? { _tag: "draft-workspace-file" as const, cwd: root, path: name }
+                  : {
+                      _tag: "media-file" as const,
+                      threadId: ThreadId.make("thread-1"),
+                      path: filePath,
+                    };
+            const issued = yield* issueAssetUrl({ resource, workspaceRoot: root });
+            const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+            const separator = suffix.indexOf("/");
+            const token = suffix.slice(0, separator);
+            const asset = yield* resolveAsset(token, suffix.slice(separator + 1));
+            expect(asset).toMatchObject({ kind: "file", path: yield* fs.realPath(filePath) });
+            if (asset?.kind !== "file") throw new Error("Expected Office asset");
+            const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+            expect(response.headers.get("content-type")).toBe(mimeType);
+            expect(response.headers.get("content-disposition")).toBeNull();
+            expect(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()))).toEqual(
+              bytes,
+            );
+            expect(yield* resolveAsset(token, `sibling.${extension}`)).toBeNull();
+            expect(yield* resolveAsset(`${token}tampered`, name)).toBeNull();
+            expect(yield* resolveAsset(token, `../${name}`)).toBeNull();
+          }
+        }
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "does not issue workspace or host previews for Office-named directories or legacy ppt",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-office-directory-" });
+        for (const extension of ["xlsx", "xls", "pptx"]) {
+          const filePath = path.join(root, `folder.${extension}`);
+          yield* fs.makeDirectory(filePath);
+          for (const resource of [
+            {
+              _tag: "workspace-file" as const,
+              threadId: ThreadId.make("thread-1"),
+              path: filePath,
+            },
+            { _tag: "draft-workspace-file" as const, cwd: root, path: filePath },
+            { _tag: "media-file" as const, threadId: ThreadId.make("thread-1"), path: filePath },
+          ]) {
+            const error = yield* issueAssetUrl({ resource, workspaceRoot: root }).pipe(Effect.flip);
+            expect(error._tag).toBe("AssetWorkspaceAssetNotFoundError");
+          }
+        }
+        const legacyPath = path.join(root, "legacy.ppt");
+        yield* fs.writeFile(legacyPath, new Uint8Array([0xd0, 0xcf, 0x11, 0xe0]));
+        const error = yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId: ThreadId.make("thread-1"), path: legacyPath },
+        }).pipe(Effect.flip);
+        expect(error).toBeInstanceOf(AssetPreviewTypeValidationError);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "serves Office attachment previews by stored extension and preserves explicit downloads",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const bytes = new Uint8Array([0x50, 0x4b, 3, 4, 0, 0xff]);
+        yield* fs.makeDirectory(config.attachmentsDir, { recursive: true });
+        for (const [extension, mimeType] of [
+          ["xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+          ["xls", "application/vnd.ms-excel"],
+          ["pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+        ] as const) {
+          const attachmentId = `thread-1-00000000-0000-4000-8000-000000000042-${extension}`;
+          const attachmentPath = path.join(config.attachmentsDir, `${attachmentId}.${extension}`);
+          yield* fs.writeFile(attachmentPath, bytes);
+          for (const disposition of ["inline", "attachment"] as const) {
+            const issued = yield* issueAssetUrl({
+              resource: {
+                _tag: "attachment",
+                attachmentId,
+                fileName: `report.${extension}`,
+                mimeType: "application/octet-stream",
+                disposition,
+              },
+            });
+            const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+            const separator = suffix.indexOf("/");
+            const token = suffix.slice(0, separator);
+            const asset = yield* resolveAsset(token, suffix.slice(separator + 1));
+            expect(asset).toMatchObject({ kind: "file", path: attachmentPath });
+            if (asset?.kind !== "file") throw new Error("Expected Office attachment");
+            const response = HttpServerResponse.toWeb(yield* assetFileResponse(asset));
+            expect(response.headers.get("content-type")).toBe(
+              disposition === "inline" ? mimeType : "application/octet-stream",
+            );
+            if (disposition === "attachment") {
+              expect(response.headers.get("content-disposition")).toContain("attachment;");
+            } else {
+              expect(response.headers.get("content-disposition")).toBeNull();
+            }
+            expect(new Uint8Array(yield* Effect.promise(() => response.arrayBuffer()))).toEqual(
+              bytes,
+            );
+            expect(yield* resolveAsset(`${token}tampered`, `report.${extension}`)).toBeNull();
+          }
+          yield* fs.remove(attachmentPath);
+          yield* fs.makeDirectory(attachmentPath);
+          const issued = yield* issueAssetUrl({
+            resource: { _tag: "attachment", attachmentId, disposition: "inline" },
+          });
+          const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const separator = suffix.indexOf("/");
+          expect(
+            yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1)),
+          ).toBeNull();
+        }
+        const attachmentId = "thread-1-00000000-0000-4000-8000-000000000043-ppt";
+        yield* fs.writeFile(path.join(config.attachmentsDir, `${attachmentId}.ppt`), bytes);
+        const issued = yield* issueAssetUrl({
+          resource: { _tag: "attachment", attachmentId, disposition: "inline" },
+        });
+        const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        expect(
+          yield* resolveAsset(suffix.slice(0, separator), suffix.slice(separator + 1)),
+        ).toMatchObject({ download: true });
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("previews workspace files with literal fragment characters in their paths", () =>

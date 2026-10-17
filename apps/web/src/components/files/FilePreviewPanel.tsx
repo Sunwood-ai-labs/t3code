@@ -12,6 +12,7 @@ import {
   isWorkspaceAudioPreviewPath,
   isWorkspaceImagePreviewPath,
   isWorkspaceVideoPreviewPath,
+  officePreviewFormat,
 } from "@t3tools/shared/filePreview";
 import {
   DEFAULT_TOKENIZE_MAX_LENGTH,
@@ -53,6 +54,8 @@ import { useClientSettings, useUpdateClientSettings } from "~/hooks/useSettings"
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
+import { useEnvironmentQuery } from "~/state/query";
+import { projectEnvironment } from "~/state/projects";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { cn } from "~/lib/utils";
@@ -72,6 +75,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
+import { WorkspaceOfficePreview } from "./WorkspaceOfficePreview";
 import { AudioPreview } from "./AudioPreview";
 import { BrowserDocumentFrame, isPdfPreviewFile } from "./BrowserDocumentFrame";
 import { DelimitedTablePreview } from "./DelimitedTablePreview";
@@ -1059,12 +1063,29 @@ export default function FilePreviewPanel({
     attachment !== undefined || (relativePath !== null && isAbsolutePath(relativePath));
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const officeFormat = relativePath === null ? null : officePreviewFormat({ name: relativePath });
+  const officeAbsolutePath =
+    relativePath === null ? null : resolvePathLinkTarget(relativePath, cwd);
+  const officeMetadata = useEnvironmentQuery(
+    officeFormat && attachment === undefined && officeAbsolutePath && canReadFiles
+      ? projectEnvironment.fileMetadata({ environmentId, input: { path: officeAbsolutePath } })
+      : null,
+  );
+  const invalidateMetadata = useAtomCommand(projectEnvironment.invalidateFileMetadata, {
+    reportFailure: false,
+  });
+  const [officeReloadRevision, setOfficeReloadRevision] = useState(0);
+  const refreshOffice = useCallback(() => {
+    if (!officeAbsolutePath) return;
+    void invalidateMetadata({ environmentId, input: { paths: [officeAbsolutePath] } });
+    setOfficeReloadRevision((revision) => revision + 1);
+  }, [environmentId, officeAbsolutePath, invalidateMetadata]);
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
   const file = useProjectFileQuery(
     environmentId,
     cwd,
     relativePath,
-    attachment === undefined && relativePath !== null,
+    attachment === undefined && relativePath !== null && officeFormat === null,
   );
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // A chat link cannot tell a folder from a file, so a folder arrives here as
@@ -1084,7 +1105,12 @@ export default function FilePreviewPanel({
   // before its read settles, and walking up never flashes a file preview.
   const isFolder =
     attachment === undefined &&
-    (file.isNotFile || (folderTrail !== undefined && file.data === null && file.error === null));
+    (file.isNotFile ||
+      officeMetadata.data?.kind === "directory" ||
+      (folderTrail !== undefined &&
+        officeFormat === null &&
+        file.data === null &&
+        file.error === null));
   const hostFolderPath = isFolder && isHostFile ? relativePath : null;
   // Everything preview-related keys off previewPath; a folder has no preview.
   const previewPath = isFolder ? null : relativePath;
@@ -1137,6 +1163,7 @@ export default function FilePreviewPanel({
   const updateClientSettings = useUpdateClientSettings();
   const showsRawText =
     previewPath !== null &&
+    officeFormat === null &&
     file.data !== null &&
     !(isMarkdown && renderMarkdown) &&
     !(tableDelimiter && renderTable) &&
@@ -1171,9 +1198,19 @@ export default function FilePreviewPanel({
         : null;
   const onFilePostRender = useFileLineReveal(relativePath, revealLine, revealRequestId);
   useWorkspaceMutationRefresh({
+    enabled: officeFormat !== null && attachment === undefined && officeAbsolutePath !== null,
+    mutationId: workspaceMutationId,
+    resourceKey: `office-metadata:${environmentId}:${officeAbsolutePath}`,
+    refresh: () => {
+      if (officeAbsolutePath)
+        void invalidateMetadata({ environmentId, input: { paths: [officeAbsolutePath] } });
+    },
+  });
+  useWorkspaceMutationRefresh({
     enabled:
       attachment === undefined &&
       relativePath !== null &&
+      officeFormat === null &&
       // Media and PDFs never show their contents, so re-reading them on every
       // workspace mutation is waste. A folder named like one still re-reads, so
       // it notices when the path becomes a file.
@@ -1335,7 +1372,12 @@ export default function FilePreviewPanel({
           ) : null}
         </div>
       ) : null}
-      {relativePath && !attachment && !isHostFile && !canWriteFiles && !fileAccess.isPending ? (
+      {relativePath &&
+      !attachment &&
+      !isHostFile &&
+      !officeFormat &&
+      !canWriteFiles &&
+      !fileAccess.isPending ? (
         <div className="shrink-0 border-b px-3 py-1.5 text-2xs text-muted-foreground">
           Read-only connection. Unsaved edits are kept until write access returns.
         </div>
@@ -1343,6 +1385,7 @@ export default function FilePreviewPanel({
       {previewPath &&
       attachment === undefined &&
       !isMedia &&
+      !officeFormat &&
       !renderBrowserFile &&
       file.data?.truncated ? (
         <div className="shrink-0 border-b border-warning/20 bg-warning-surface px-3 py-1.5 text-2xs text-warning-foreground">
@@ -1363,6 +1406,33 @@ export default function FilePreviewPanel({
               htmlRender={attachment.htmlRender === true}
               threadRef={threadRef}
             />
+          ) : relativePath && officeFormat && absolutePath ? (
+            !canReadFiles ? (
+              <FileSurfaceFailure
+                message={fileAccess.error ?? "This connection cannot read host files."}
+              />
+            ) : officeMetadata.error ? (
+              <FileSurfaceFailure message={officeMetadata.error} onRetry={refreshOffice} />
+            ) : !officeMetadata.isSuccess ? (
+              <FileSurfaceLoading />
+            ) : officeMetadata.data?.kind !== "file" ? (
+              <FileSurfaceFailure
+                message="This file is unavailable. Open the original in another app."
+                onRetry={refreshOffice}
+              />
+            ) : (
+              <WorkspaceOfficePreview
+                key={`${environmentId}:${threadRef.threadId}:${absolutePath}`}
+                environmentId={environmentId}
+                threadRef={threadRef}
+                draft={draft}
+                absolutePath={absolutePath}
+                workspaceRoot={cwd}
+                format={officeFormat}
+                workspaceMutationId={workspaceMutationId}
+                reloadRevision={officeReloadRevision}
+              />
+            )
           ) : relativePath && isVideo && absolutePath ? (
             <WorkspaceVideoPreview
               key={`${environmentId}:${threadRef.threadId}:${absolutePath}`}
@@ -1407,6 +1477,10 @@ export default function FilePreviewPanel({
               title={relativePath}
               workspaceMutationId={workspaceMutationId}
             />
+          ) : relativePath &&
+            /\.ppt$/i.test(relativePath) &&
+            file.readError?.failure === "binary_file" ? (
+            <FileSurfaceFailure message="Legacy PowerPoint (.ppt) preview is not supported. Open the original file in another app." />
           ) : relativePath && file.error && file.data === null ? (
             <div
               role="alert"
@@ -1507,9 +1581,11 @@ export default function FilePreviewPanel({
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
               workspaceMutationId={workspaceMutationId}
-              {...(previewPath && !isMedia && !isPdf
-                ? { onRefreshSelectedFile: file.refresh }
-                : {})}
+              {...(officeFormat
+                ? { onRefreshSelectedFile: refreshOffice }
+                : previewPath && !isMedia && !isPdf
+                  ? { onRefreshSelectedFile: file.refresh }
+                  : {})}
             />
           </aside>
         ) : null}

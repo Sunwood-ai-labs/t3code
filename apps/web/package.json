@@ -55,6 +55,7 @@
     "culori": "^4.0.2",
     "dompurify": "^3.4.16",
     "effect": "catalog:",
+    "fflate": "0.8.3",
     "hast-util-to-html": "^9.0.5",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "heic-to": "^1.5.2",
@@ -69,8 +70,10 @@
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
     "remark-gfm": "catalog:",
+    "saxes": "6.0.0",
     "tailwind-merge": "^3.4.0",
     "unbash": "^5.0.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zustand": "^5.0.11"
   },
   "devDependencies": {

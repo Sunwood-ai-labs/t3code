@@ -151,6 +151,12 @@
   ],
   "packageOverrides": [
     {
+      "name": "saxes",
+      "version": "6.0.0",
+      "noticeFile": "third-party-licenses/saxes-6.0.0.txt",
+      "sourceUrl": "https://github.com/lddubeau/saxes/blob/v6.0.0/LICENSE"
+    },
+    {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
       "generatedNotices": [

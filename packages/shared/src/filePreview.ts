@@ -73,6 +73,40 @@ export function filePreviewKind(file: {
 
 export const FILE_TEXT_PREVIEW_MAX_BYTES = 1024 * 1024;
 
+const OFFICE_PREVIEW_MIME_TYPES = {
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".xls": "application/vnd.ms-excel",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+} as const;
+
+export type OfficePreviewFormat = "xlsx" | "xls" | "pptx";
+
+export function officePreviewFormat(file: {
+  readonly name: string;
+  readonly mimeType?: string;
+}): OfficePreviewFormat | null {
+  const mime = file.mimeType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  const generic = !mime || mime === "application/octet-stream" || mime === "text/plain";
+  const office =
+    mime === "application/vnd.ms-powerpoint" ||
+    Object.values(OFFICE_PREVIEW_MIME_TYPES).some((type) => mime === type);
+  let mimeFormat: OfficePreviewFormat | null = null;
+  for (const [extension, expectedMime] of Object.entries(OFFICE_PREVIEW_MIME_TYPES)) {
+    if ((generic || office) && file.name.toLowerCase().endsWith(extension)) {
+      return extension.slice(1) as OfficePreviewFormat;
+    }
+    if (mime === expectedMime) mimeFormat = extension.slice(1) as OfficePreviewFormat;
+  }
+  return mimeFormat;
+}
+
+export function officePreviewMimeTypeFromExtension(extension: string): string | null {
+  const normalized = extension.toLowerCase();
+  return Object.hasOwn(OFFICE_PREVIEW_MIME_TYPES, normalized)
+    ? OFFICE_PREVIEW_MIME_TYPES[normalized as keyof typeof OFFICE_PREVIEW_MIME_TYPES]
+    : null;
+}
+
 export function decodeFilePreviewText(bytes: Uint8Array, truncated = false) {
   const bounded = bytes.subarray(0, FILE_TEXT_PREVIEW_MAX_BYTES);
   if (bounded.some((byte) => byte === 0))
@@ -150,6 +184,7 @@ export function hostPreviewMimeTypeFromExtension(extension: string): string | nu
     mediaMimeTypeFromExtension(extension) ??
     audioMimeTypeFromExtension(extension) ??
     BROWSER_MIME_TYPE_BY_EXTENSION.get(extension.toLowerCase()) ??
+    officePreviewMimeTypeFromExtension(extension) ??
     null
   );
 }
@@ -207,5 +242,9 @@ export function isWorkspaceAudioPreviewPath(path: string): boolean {
 }
 
 export function isWorkspacePreviewEntryPath(path: string): boolean {
-  return isWorkspaceBrowserPreviewPath(path) || isWorkspaceImagePreviewPath(path);
+  return (
+    isWorkspaceBrowserPreviewPath(path) ||
+    isWorkspaceImagePreviewPath(path) ||
+    officePreviewFormat({ name: path }) !== null
+  );
 }

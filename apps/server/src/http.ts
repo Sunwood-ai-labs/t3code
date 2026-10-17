@@ -5,6 +5,10 @@ import {
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
+import {
+  officePreviewFormat,
+  officePreviewMimeTypeFromExtension,
+} from "@t3tools/shared/filePreview";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as Data from "effect/Data";
@@ -73,7 +77,9 @@ const isSafeDownloadMimeType = (mimeType: string): boolean =>
 const isSafeInlineMediaMimeType = (mimeType: string): boolean =>
   DOWNLOAD_MIME_TYPE_PATTERN.test(mimeType) && /^(?:audio|video)\//i.test(mimeType);
 const isSafeInlineDocumentMimeType = (mimeType: string): boolean =>
-  mimeType.toLowerCase() === "application/pdf" || mimeType.toLowerCase() === "text/html";
+  mimeType.toLowerCase() === "application/pdf" ||
+  mimeType.toLowerCase() === "text/html" ||
+  officePreviewFormat({ name: "", mimeType }) !== null;
 
 export function downloadContentDisposition(fileName?: string): string {
   if (fileName === undefined) {
@@ -121,7 +127,7 @@ export function assetResponseHeaders(
               "Content-Type":
                 inlineMimeType.toLowerCase() === "text/html"
                   ? "text/html; charset=utf-8"
-                  : "application/pdf",
+                  : inlineMimeType.toLowerCase(),
               ...(inlineMimeType.toLowerCase() === "text/html"
                 ? { "Content-Security-Policy": HTML_CONTENT_SECURITY_POLICY }
                 : {}),
@@ -131,7 +137,13 @@ export function assetResponseHeaders(
                 "Content-Type": "text/html; charset=utf-8",
                 "Content-Security-Policy": HTML_CONTENT_SECURITY_POLICY,
               }
-            : {}),
+            : officePreviewMimeTypeFromExtension(lowerPath.slice(lowerPath.lastIndexOf(".")))
+              ? {
+                  "Content-Type": officePreviewMimeTypeFromExtension(
+                    lowerPath.slice(lowerPath.lastIndexOf(".")),
+                  )!,
+                }
+              : {}),
     ...(!options?.download && lowerPath.endsWith(".svg")
       ? { "Content-Security-Policy": SVG_CONTENT_SECURITY_POLICY }
       : {}),

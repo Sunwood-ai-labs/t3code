@@ -1,9 +1,15 @@
 import { EnvironmentId } from "@t3tools/contracts";
 import { act, type ReactNode } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
+import * as XLSX from "xlsx";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { AttachmentFilePreview } from "./AttachmentFilePreview";
+import {
+  parseOfficeDocument,
+  type OfficeWorkerRequest,
+  type OfficeWorkerResponse,
+} from "./officeDocumentParser";
 
 const { refresh } = vi.hoisted(() => ({ refresh: vi.fn<() => Promise<string | null>>() }));
 
@@ -15,6 +21,13 @@ vi.mock("~/components/ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("~/components/ChatMarkdown", () => ({ default: () => null }));
 vi.mock("~/components/ui/scroll-area", () => ({
   ScrollArea: ({ children }: { children: ReactNode }) => children,
+}));
+vi.mock("~/components/ui/button", () => ({
+  Button: ({
+    variant: _variant,
+    size: _size,
+    ...props
+  }: React.ComponentProps<"button"> & { variant?: string; size?: string }) => <button {...props} />,
 }));
 vi.mock("./ReadOnlySourcePreview", () => ({
   default: ({ text }: { text: string }) => <pre>{text}</pre>,
@@ -129,5 +142,88 @@ describe("attachment HTML preview recovery", () => {
     await toggleMode("Show rendered page");
     expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
     expect(renderer.root.findByType("iframe").props.title).toBe("document.html");
+  });
+
+  it("renders an actual xlsx attachment with the legacy Excel MIME as Unicode cells and cached formulas", async () => {
+    await import("./OfficeDocumentPreview");
+    const workbook = XLSX.utils.book_new();
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ["商品 🐈", "数量", "単価", "合計"],
+      ["りんご café", 12, 150, 1800],
+    ]);
+    sheet.D2 = { t: "n", f: "B2*C2", v: 1800 };
+    XLSX.utils.book_append_sheet(workbook, sheet, "売上");
+    const file = new Blob(
+      [XLSX.write(workbook, { type: "array", bookType: "xlsx", bookSST: true })],
+      { type: "application/vnd.ms-excel" },
+    );
+    let complete: (() => void) | undefined;
+    const parsed = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const terminate = vi.fn();
+    const formats: string[] = [];
+    vi.stubGlobal(
+      "Worker",
+      class extends EventTarget {
+        terminate = terminate;
+        constructor() {
+          super();
+          queueMicrotask(() =>
+            this.dispatchEvent(
+              new MessageEvent<OfficeWorkerResponse>("message", { data: { type: "ready" } }),
+            ),
+          );
+        }
+        postMessage(request: OfficeWorkerRequest) {
+          formats.push(request.format);
+          let response: OfficeWorkerResponse;
+          try {
+            response = {
+              id: request.id,
+              ok: true,
+              document: parseOfficeDocument(new Uint8Array(request.buffer), request.format),
+            };
+          } catch (error) {
+            response = {
+              id: request.id,
+              ok: false,
+              error: error instanceof Error ? error.message : "Could not parse workbook",
+            };
+          }
+          this.dispatchEvent(new MessageEvent<OfficeWorkerResponse>("message", { data: response }));
+          complete?.();
+        }
+      },
+    );
+    await act(async () => {
+      renderer = create(
+        <AttachmentFilePreview
+          name="report.xlsx"
+          mimeType={file.type}
+          sizeBytes={file.size}
+          file={file}
+        />,
+      );
+    });
+    await parsed;
+    await act(async () => {});
+    expect(formats).toEqual(["xlsx"]);
+    expect(renderer.root.findByType("table").props["aria-label"]).toBe("売上 cell values");
+    expect(renderer.root.findAllByType("td").map((cell) => cell.children.join(""))).toEqual([
+      "商品 🐈",
+      "数量",
+      "単価",
+      "合計",
+      "りんご café",
+      "12",
+      "150",
+      "1800",
+    ]);
+    expect(renderer.root.findAllByProps({ role: "alert" })).toHaveLength(0);
+    expect(renderer.root.findAllByType("pre")).toHaveLength(0);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(refresh).not.toHaveBeenCalled();
+    expect(terminate).toHaveBeenCalledOnce();
   });
 });

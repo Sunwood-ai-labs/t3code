@@ -11,7 +11,107 @@ import {
   isWorkspacePreviewEntryPath,
   isWorkspaceVideoPreviewPath,
   mediaKindFromPath,
+  officePreviewFormat,
+  officePreviewMimeTypeFromExtension,
 } from "./filePreview.ts";
+
+describe("bounded web Office previews", () => {
+  it.each([
+    {
+      name: "report.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      expected: "xlsx",
+    },
+    { name: "report.xlsx", mimeType: "application/vnd.ms-excel", expected: "xlsx" },
+    { name: "report.xls", mimeType: "application/vnd.ms-excel", expected: "xls" },
+    {
+      name: "report.xls",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      expected: "xls",
+    },
+    {
+      name: "slides.pptx",
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      expected: "pptx",
+    },
+    { name: "slides.pptx", mimeType: "application/vnd.ms-powerpoint", expected: "pptx" },
+    {
+      name: "report.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      expected: "xlsx",
+    },
+    { name: "slides.pptx", mimeType: "application/vnd.ms-excel", expected: "pptx" },
+    { name: "REPORT.XlSx", mimeType: " Application/Vnd.Ms-Excel ; version=1 ", expected: "xlsx" },
+    {
+      name: "REPORT.XLS",
+      mimeType:
+        " APPLICATION/VND.OPENXMLFORMATS-OFFICEDOCUMENT.SPREADSHEETML.SHEET; charset=binary",
+      expected: "xls",
+    },
+    {
+      name: "SLIDES.PpTx",
+      mimeType: " APPLICATION/VND.MS-POWERPOINT ; version=1",
+      expected: "pptx",
+    },
+  ])(
+    "selects the supported filename format for $name with Office MIME $mimeType",
+    ({ name, mimeType, expected }: { name: string; mimeType: string; expected: string }) => {
+      expect(officePreviewFormat({ name, mimeType })).toBe(expected);
+      expect(filePreviewKind({ name, mimeType })).toBe("unsupported");
+    },
+  );
+
+  it.each([
+    { name: "report.xlsx", mimeType: "image/png" },
+    { name: "report.xls", mimeType: "application/zip" },
+    { name: "slides.pptx", mimeType: "text/html" },
+    { name: "report.xlsx", mimeType: " Application/PDF ; version=1" },
+  ])(
+    "preserves a non-Office content type conflict for $name ($mimeType)",
+    ({ name, mimeType }: { name: string; mimeType: string }) => {
+      expect(officePreviewFormat({ name, mimeType })).toBeNull();
+    },
+  );
+
+  it.each(["legacy.ppt", "download"])(
+    "keeps legacy PowerPoint MIME unsupported for $name",
+    (name: string) => {
+      expect(officePreviewFormat({ name, mimeType: "application/vnd.ms-powerpoint" })).toBeNull();
+    },
+  );
+
+  it.each(["xlsx", "xls", "pptx"] as const)(
+    "recognizes %s without changing native fallback",
+    (format) => {
+      const name = `report.${format.toUpperCase()}`;
+      expect(officePreviewFormat({ name })).toBe(format);
+      expect(filePreviewKind({ name })).toBe("unsupported");
+      expect(isWorkspacePreviewEntryPath(name)).toBe(true);
+      const mimeType = officePreviewMimeTypeFromExtension(`.${format}`)!;
+      expect(hostPreviewMimeTypeFromExtension(`.${format}`)).toBe(mimeType);
+      expect(officePreviewFormat({ name: "download", mimeType: `${mimeType}; version=1` })).toBe(
+        format,
+      );
+      expect(filePreviewKind({ name, mimeType })).toBe("unsupported");
+    },
+  );
+
+  it.each([
+    "legacy.ppt",
+    "report.xlsx.exe",
+    "report.xlsx?download=1",
+    "report%2Exlsx",
+    "report.pptm",
+  ])("keeps %s on the existing fallback", (name) => {
+    expect(officePreviewFormat({ name })).toBeNull();
+    expect(isWorkspacePreviewEntryPath(name)).toBe(false);
+  });
+
+  it("honors a specific conflicting content type", () => {
+    expect(officePreviewFormat({ name: "report.xlsx", mimeType: "image/png" })).toBeNull();
+    expect(officePreviewMimeTypeFromExtension(".ppt")).toBeNull();
+  });
+});
 
 describe("workspace file previews", () => {
   it.each(["report.html", "report.HTM", "document#draft.pdf", "reports?old/document.pdf"])(
