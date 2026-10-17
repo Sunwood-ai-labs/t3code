@@ -147,6 +147,23 @@ function send(message: JsonRpcMessage): void {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+function publishInbound(message: JsonRpcMessage): void {
+  // A completed response can immediately close this process, so publish its status first.
+  advance();
+  let completedCursor = cursor;
+  while (
+    transcript.entries[completedCursor]?.type === "runtime_exit" &&
+    (transcript.entries[completedCursor]?.status === "success" ||
+      transcript.entries[completedCursor]?.status === "cancelled")
+  ) {
+    completedCursor += 1;
+  }
+  if (completedCursor === transcript.entries.length) {
+    while (cursor < completedCursor) advance();
+  }
+  send(message);
+}
+
 function pendingClientRequestId(method: string): string | number | undefined {
   return pendingClientRequestIds.get(method);
 }
@@ -186,7 +203,7 @@ function emitInbound(recorded: LogicalFrame): void {
   const frame = materializeInbound(recorded) as LogicalFrame;
   switch (frame.kind) {
     case "notification":
-      send({
+      publishInbound({
         jsonrpc: "2.0",
         method: frame.method,
         ...(frame.params === undefined ? {} : { params: frame.params }),
@@ -196,7 +213,7 @@ function emitInbound(recorded: LogicalFrame): void {
       const id = nextAgentRequestId;
       nextAgentRequestId += 1;
       pendingAgentRequestMethods.set(String(id), frame.method);
-      send({
+      publishInbound({
         jsonrpc: "2.0",
         id,
         method: frame.method,
@@ -212,7 +229,7 @@ function emitInbound(recorded: LogicalFrame): void {
         return;
       }
       pendingClientRequestIds.delete(frame.method);
-      send({
+      publishInbound({
         jsonrpc: "2.0",
         id,
         ...(frame.result === undefined ? {} : { result: frame.result }),
@@ -246,7 +263,6 @@ function flushInbound(): void {
     }
     emitInbound(frame);
     if (stopped) return;
-    advance();
   }
 }
 
