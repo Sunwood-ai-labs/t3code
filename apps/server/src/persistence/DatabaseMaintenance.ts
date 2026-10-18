@@ -1,8 +1,10 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import { isSqlError } from "effect/sql/SqlError";
@@ -25,7 +27,7 @@ export class DatabaseInUseError extends Schema.TaggedError<DatabaseInUseError>()
   { path: Schema.String, cause: Schema.Defect() },
 ) {
   override get message() {
-    return "Stop the T3 Code server and desktop app before compacting the database.";
+    return "Stop the T3 Code server and desktop app, including any version before 0.1.0, before repairing the database.";
   }
 }
 
@@ -56,6 +58,15 @@ export class DatabaseCompactError extends Schema.TaggedError<DatabaseCompactErro
   }
 }
 
+export class LegacyDatabaseRemoveError extends Schema.TaggedError<LegacyDatabaseRemoveError>()(
+  "LegacyDatabaseRemoveError",
+  { path: Schema.String, cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not delete the database from before 0.1.0. Check that this user can write to the data directory.";
+  }
+}
+
 /** Offline inspection and repair of a T3 state database, for `t3 doctor`. */
 export class DatabaseMaintenance extends Context.Service<
   DatabaseMaintenance,
@@ -65,6 +76,8 @@ export class DatabaseMaintenance extends Context.Service<
         readonly databaseBytes: number;
         readonly reclaimableBytes: number;
         readonly incrementalVacuumEnabled: boolean;
+        /** Size of the database from before 0.1.0 still kept beside it, or null. */
+        readonly legacyDatabaseBytes: number | null;
       },
       DatabaseMissingError | DatabaseInspectError
     >;
@@ -81,6 +94,13 @@ export class DatabaseMaintenance extends Context.Service<
       | DatabaseProjectionsInvalidError
       | DatabaseCompactError
     >;
+    /**
+     * Deletes the database from before 0.1.0 kept beside this one. Versions
+     * before 0.1.0 read only that file; this one stays intact.
+     */
+    readonly removeLegacyDatabase: (
+      databasePath: string,
+    ) => Effect.Effect<void, DatabaseInUseError | LegacyDatabaseRemoveError>;
   }
 >()("t3/persistence/DatabaseMaintenance") {}
 
@@ -102,8 +122,31 @@ const readStorage = Effect.gen(function* () {
   };
 });
 
+/**
+ * Holds an exclusive lock on the connection's database. In WAL mode this is
+ * refused while any other connection has the file open, even an idle one,
+ * which is how a running server or desktop app is detected.
+ */
+const lockExclusively = (databasePath: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`PRAGMA busy_timeout = 0`;
+    yield* sql`PRAGMA locking_mode = EXCLUSIVE`;
+    yield* sql`BEGIN EXCLUSIVE`.pipe(
+      Effect.mapError((cause) =>
+        isSqlError(cause) && cause.reason._tag === "LockTimeoutError"
+          ? new DatabaseInUseError({ path: databasePath, cause })
+          : cause,
+      ),
+    );
+    yield* sql`COMMIT`;
+  });
+
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const legacyPath = (databasePath: string) =>
+    path.join(path.dirname(databasePath), "state.sqlite");
 
   const locate = Effect.fn("DatabaseMaintenance.locate")(function* (databasePath: string) {
     if (!(yield* fs.exists(databasePath))) {
@@ -114,9 +157,14 @@ const make = Effect.gen(function* () {
   const inspect = Effect.fn("DatabaseMaintenance.inspect")(
     function* (databasePath: string) {
       yield* locate(databasePath);
-      return yield* readStorage.pipe(
+      const storage = yield* readStorage.pipe(
         Effect.provide(NodeSqliteClient.layer({ filename: databasePath, readonly: true })),
       );
+      const legacy = legacyPath(databasePath);
+      const legacyDatabaseBytes = (yield* fs.exists(legacy))
+        ? Number((yield* fs.stat(legacy)).size)
+        : null;
+      return { ...storage, legacyDatabaseBytes };
     },
     (effect, databasePath) =>
       effect.pipe(
@@ -132,19 +180,8 @@ const make = Effect.gen(function* () {
       const beforeBytes = Number((yield* fs.stat(databasePath)).size);
       const result = yield* Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        // Hold an exclusive lock through compaction and VACUUM. In WAL mode this
-        // is refused while any other connection has the file open, even an idle
-        // one, which is how a running server or desktop app is detected.
-        yield* sql`PRAGMA busy_timeout = 0`;
-        yield* sql`PRAGMA locking_mode = EXCLUSIVE`;
-        yield* sql`BEGIN EXCLUSIVE`.pipe(
-          Effect.mapError((cause) =>
-            isSqlError(cause) && cause.reason._tag === "LockTimeoutError"
-              ? new DatabaseInUseError({ path: databasePath, cause })
-              : cause,
-          ),
-        );
-        yield* sql`COMMIT`;
+        // Held through compaction and VACUUM.
+        yield* lockExclusively(databasePath);
         const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
         if (!(yield* maintenance.verify).valid) {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
@@ -183,7 +220,41 @@ const make = Effect.gen(function* () {
       ),
   );
 
-  return DatabaseMaintenance.of({ inspect, compact });
+  const removeLegacyDatabase = Effect.fn("DatabaseMaintenance.removeLegacyDatabase")(
+    function* (databasePath: string) {
+      const legacy = legacyPath(databasePath);
+      if (!(yield* fs.exists(legacy))) return;
+      const platform = yield* HostProcess.Platform;
+      const removeFiles = Effect.gen(function* () {
+        for (const suffix of ["", "-wal", "-shm"]) {
+          yield* fs.remove(legacy + suffix, { force: true });
+        }
+      });
+      // POSIX needs the SQLite lock through unlink. Windows refuses unlink while any
+      // SQLite handle is open, including ours, so its sharing check protects removal.
+      yield* Effect.gen(function* () {
+        yield* lockExclusively(legacy);
+        if (platform !== "win32") yield* removeFiles;
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: legacy })));
+      if (platform === "win32") {
+        yield* removeFiles.pipe(
+          Effect.mapError((cause) =>
+            cause.reason._tag === "Busy" ? new DatabaseInUseError({ path: legacy, cause }) : cause,
+          ),
+        );
+      }
+    },
+    (effect, databasePath) =>
+      effect.pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "DatabaseInUseError"
+            ? cause
+            : new LegacyDatabaseRemoveError({ path: legacyPath(databasePath), cause }),
+        ),
+      ),
+  );
+
+  return DatabaseMaintenance.of({ inspect, compact, removeLegacyDatabase });
 });
 
 export const layer = Layer.effect(DatabaseMaintenance, make);

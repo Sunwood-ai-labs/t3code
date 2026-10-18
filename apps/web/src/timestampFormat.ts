@@ -235,7 +235,9 @@ export function msUntilRelativeTimeChange(
   const elapsedMs = Math.max(0, nowMs - date.getTime());
   const unitMs = relativeTimeUnitMs(elapsedMs);
   const nextChangeMs = date.getTime() + (Math.floor(elapsedMs / unitMs) + 1) * unitMs;
-  return nextChangeMs - nowMs;
+  // setTimeout fires at once past 2^31-1 ms, which would loop on a far-future
+  // timestamp. Waking early is harmless: the caller re-reads and re-schedules.
+  return Math.min(nextChangeMs - nowMs, DAY_MS);
 }
 
 export function formatRelativeElapsed(elapsedMs: number): RelativeTimeParts {
@@ -249,13 +251,16 @@ export function formatRelativeElapsed(elapsedMs: number): RelativeTimeParts {
   return { value: `${days}d`, suffix: "ago" };
 }
 
-export function formatRelativeTime(isoDate: string): RelativeTimeParts | null {
-  const elapsedMs = relativeTimeElapsedMs(isoDate);
+export function formatRelativeTime(
+  isoDate: string,
+  nowMs: number = Date.now(),
+): RelativeTimeParts | null {
+  const elapsedMs = relativeTimeElapsedMs(isoDate, nowMs);
   return elapsedMs === null ? null : formatRelativeElapsed(elapsedMs);
 }
 
-export function formatRelativeTimeLabel(isoDate: string) {
-  const relative = formatRelativeTime(isoDate);
+export function formatRelativeTimeLabel(isoDate: string, nowMs: number = Date.now()) {
+  const relative = formatRelativeTime(isoDate, nowMs);
   if (!relative) return "";
   return relative.suffix ? `${relative.value} ${relative.suffix}` : relative.value;
 }
