@@ -10,6 +10,9 @@ const entries: ReadonlyArray<readonly [key: string, value: string]> = [
   ["commit.gpgsign", "false"],
   ["tag.gpgsign", "false"],
   ["init.defaultBranch", "main"],
+  // Scoped fixture cleanup must run after any automatic repository maintenance.
+  ["gc.autoDetach", "false"],
+  ["maintenance.autoDetach", "false"],
 ];
 
 const existing = Number(process.env.GIT_CONFIG_COUNT ?? "0");
