@@ -11,8 +11,7 @@ vi.mock(import("~/assets/assetUrls"), async (original) => ({
   useAssetUrlRefresh: () => refresh,
 }));
 // The real source view highlights through a worker pool; the text it receives is what matters here.
-vi.mock(import("./ReadOnlySourcePreview"), async (original) => ({
-  ...(await original()),
+vi.mock(import("./ReadOnlySourcePreview"), () => ({
   default: ({ text }: { text: string }) => <pre>{text}</pre>,
 }));
 
@@ -25,7 +24,8 @@ describe("attachment HTML preview recovery", () => {
   let root: Root;
   let container: HTMLDivElement;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await import("./ReadOnlySourcePreview");
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     now = 0;
     vi.spyOn(Date, "now").mockImplementation(() => now);
